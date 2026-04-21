@@ -102,9 +102,58 @@ select:hover,select:focus{border-color:var(--ac)}
   .rs.lft{border-right:none}
 }
 @media(max-width:380px){.sty-grid{grid-template-columns:1fr}}
+
+.lock-screen{position:fixed;inset:0;background:var(--bg);z-index:9999;display:flex;align-items:center;justify-content:center;flex-direction:column}
+.lock-card{background:var(--s1);border:1px solid var(--bd);border-radius:16px;padding:40px;width:340px;text-align:center}
+.lock-logo{width:56px;height:56px;object-fit:contain;margin:0 auto 20px;display:block}
+.lock-title{font-family:'Syne',sans-serif;font-size:20px;font-weight:700;color:var(--tx);margin-bottom:6px}
+.lock-sub{font-size:13px;color:var(--mu);margin-bottom:24px;line-height:1.5}
+.lock-input{width:100%;background:var(--s2);border:1px solid var(--bd);border-radius:9px;padding:11px 14px;color:var(--tx);font-size:14px;font-family:'DM Sans',sans-serif;outline:none;text-align:center;letter-spacing:2px;margin-bottom:12px;transition:border-color .2s}
+.lock-input:focus{border-color:var(--ac)}
+.lock-btn{width:100%;padding:12px;background:var(--ac);border:none;border-radius:9px;color:#fff;font-family:'Syne',sans-serif;font-size:14px;font-weight:700;cursor:pointer;margin-bottom:10px;transition:opacity .2s}
+.lock-btn:hover{opacity:.85}
+.lock-btn.secondary{background:transparent;border:1px solid var(--bd);color:var(--mu);font-family:'DM Sans',sans-serif;font-weight:400}
+.lock-btn.secondary:hover{border-color:var(--ac);color:var(--tx)}
+.lock-err{font-size:12px;color:var(--red);min-height:18px;margin-bottom:8px}
+.lock-setup-fields{text-align:left;margin-bottom:16px}
+.lock-setup-fields label{font-size:10px;font-weight:500;color:var(--mu);text-transform:uppercase;letter-spacing:.08em;display:block;margin-bottom:4px;margin-top:10px}
+.lock-setup-fields .lock-input{letter-spacing:0;text-align:left;margin-bottom:0}
 </style>
 </head>
 <body>
+
+<!-- Lock Screen -->
+<div class="lock-screen" id="lockScreen">
+  <div class="lock-card" id="lockCard">
+    <img src="https://omerbrod-lab.github.io/ringready-generator/logo.png" class="lock-logo" onerror="this.style.display='none'">
+    <div class="lock-title" id="lockTitle">RingReady Generator</div>
+    <div class="lock-sub" id="lockSub">Enter your password to unlock</div>
+    <div class="lock-err" id="lockErr"></div>
+
+    <!-- Unlock mode -->
+    <div id="unlockMode">
+      <input type="password" class="lock-input" id="lockPass" placeholder="Password" onkeydown="if(event.key==='Enter')unlock()">
+      <button class="lock-btn" onclick="unlock()">Unlock</button>
+      <button class="lock-btn secondary" onclick="showSetup()">Set up new password</button>
+    </div>
+
+    <!-- Setup mode -->
+    <div id="setupMode" style="display:none">
+      <div class="lock-setup-fields">
+        <label>Anthropic API Key</label>
+        <input type="password" class="lock-input" id="setupKeyA" placeholder="sk-ant-...">
+        <label>OpenAI API Key</label>
+        <input type="password" class="lock-input" id="setupKeyO" placeholder="sk-...">
+        <label>Choose a password</label>
+        <input type="password" class="lock-input" id="setupPass" placeholder="Min 4 characters">
+        <label>Confirm password</label>
+        <input type="password" class="lock-input" id="setupPass2" placeholder="Repeat password" onkeydown="if(event.key==='Enter')saveSetup()">
+      </div>
+      <button class="lock-btn" onclick="saveSetup()">Save & Unlock</button>
+      <button class="lock-btn secondary" onclick="showUnlock()">Cancel</button>
+    </div>
+  </div>
+</div>
 <div class="glow"></div>
 <div class="wrap">
 
@@ -238,9 +287,123 @@ select:hover,select:focus{border-color:var(--ac)}
 
 </div>
 <script>
+
+// ============ ENCRYPTED STORAGE ============
+const STORE_KEY = 'rr_enc_v1';
+
+async function deriveKey(password, salt) {
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    {name:'PBKDF2', salt, iterations:100000, hash:'SHA-256'},
+    keyMaterial, {name:'AES-GCM', length:256}, false, ['encrypt','decrypt']
+  );
+}
+
+async function encryptData(data, password) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveKey(password, salt);
+  const enc = new TextEncoder();
+  const encrypted = await crypto.subtle.encrypt({name:'AES-GCM', iv}, key, enc.encode(JSON.stringify(data)));
+  const result = new Uint8Array(salt.length + iv.length + encrypted.byteLength);
+  result.set(salt, 0);
+  result.set(iv, 16);
+  result.set(new Uint8Array(encrypted), 28);
+  return btoa(String.fromCharCode(...result));
+}
+
+async function decryptData(b64, password) {
+  const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const salt = bytes.slice(0, 16);
+  const iv = bytes.slice(16, 28);
+  const data = bytes.slice(28);
+  const key = await deriveKey(password, salt);
+  const dec = await crypto.subtle.decrypt({name:'AES-GCM', iv}, key, data);
+  return JSON.parse(new TextDecoder().decode(dec));
+}
+
+function hasStoredKeys() {
+  return !!localStorage.getItem(STORE_KEY);
+}
+
+async function unlock() {
+  const pass = document.getElementById('lockPass').value;
+  if (!pass) { setLockErr('Enter your password'); return; }
+  try {
+    const stored = localStorage.getItem(STORE_KEY);
+    const data = await decryptData(stored, pass);
+    document.getElementById('keyA').value = data.keyA || '';
+    document.getElementById('keyAm').value = data.keyA || '';
+    document.getElementById('keyO').value = data.keyO || '';
+    document.getElementById('keyOm').value = data.keyO || '';
+    chkKeys();
+    hideLock();
+  } catch(e) {
+    setLockErr('Wrong password. Try again.');
+    document.getElementById('lockPass').value = '';
+    document.getElementById('lockPass').focus();
+  }
+}
+
+async function saveSetup() {
+  const keyA = document.getElementById('setupKeyA').value.trim();
+  const keyO = document.getElementById('setupKeyO').value.trim();
+  const pass = document.getElementById('setupPass').value;
+  const pass2 = document.getElementById('setupPass2').value;
+  if (!keyA.startsWith('sk-ant')) { setLockErr('Invalid Anthropic key'); return; }
+  if (!keyO.startsWith('sk-') || keyO.startsWith('sk-ant')) { setLockErr('Invalid OpenAI key'); return; }
+  if (pass.length < 4) { setLockErr('Password must be at least 4 characters'); return; }
+  if (pass !== pass2) { setLockErr('Passwords do not match'); return; }
+  const encrypted = await encryptData({keyA, keyO}, pass);
+  localStorage.setItem(STORE_KEY, encrypted);
+  document.getElementById('keyA').value = keyA;
+  document.getElementById('keyAm').value = keyA;
+  document.getElementById('keyO').value = keyO;
+  document.getElementById('keyOm').value = keyO;
+  chkKeys();
+  hideLock();
+}
+
+function showSetup() {
+  document.getElementById('unlockMode').style.display = 'none';
+  document.getElementById('setupMode').style.display = 'block';
+  document.getElementById('lockTitle').textContent = 'First-time setup';
+  document.getElementById('lockSub').textContent = 'Enter your API Keys and choose a password. Keys are encrypted before saving.';
+  setLockErr('');
+}
+
+function showUnlock() {
+  document.getElementById('setupMode').style.display = 'none';
+  document.getElementById('unlockMode').style.display = 'block';
+  document.getElementById('lockTitle').textContent = 'RingReady Generator';
+  document.getElementById('lockSub').textContent = 'Enter your password to unlock';
+  setLockErr('');
+}
+
+function setLockErr(msg) { document.getElementById('lockErr').textContent = msg; }
+
+function hideLock() {
+  document.getElementById('lockScreen').style.display = 'none';
+}
+
+function initLock() {
+  if (hasStoredKeys()) {
+    showUnlock();
+    setTimeout(() => document.getElementById('lockPass').focus(), 100);
+  } else {
+    showSetup();
+    document.getElementById('lockTitle').textContent = 'First-time setup';
+    document.getElementById('lockSub').textContent = 'Enter your API Keys and choose a password to get started.';
+  }
+}
+
+window.addEventListener('load', initLock);
+// ============ END ENCRYPTED STORAGE ============
+
 if(window.innerWidth<=640) document.getElementById('mob-keys').style.display='block';
 
-const LOGO_URL='https://www.ring-ready.com/static/images/ringready_logo_no_bg_optimized.webp';
+const LOGO_URL='https://omerbrod-lab.github.io/ringready-generator/logo.png';
 let selSty='ugc', curAd=null, curImgUrl=null, curImgBlob=null;
 
 function pick(el,s){document.querySelectorAll('.sc').forEach(c=>c.classList.remove('active'));el.classList.add('active');selSty=s}
@@ -332,11 +495,11 @@ Respond ONLY with valid JSON, no markdown:
 
 // ---- OVERLAY RENDERING ----
 function buildOverlayHTML(ad, sty) {
-  const LOGO = `<img src="${LOGO_URL}" style="width:48px;height:48px;object-fit:contain" onerror="this.style.display='none'" crossorigin="anonymous">`;
+  const LOGO = `<img src="${LOGO_URL}" style="width:52px;height:52px;object-fit:contain" onerror="this.style.display='none'" crossorigin="anonymous">`;
 
   const bottomBar = `
     <div style="position:absolute;bottom:0;left:0;right:0;padding:22px 28px;background:linear-gradient(to top,rgba(0,0,0,0.92) 0%,rgba(0,0,0,0.6) 60%,transparent 100%);display:flex;align-items:center;justify-content:space-between;gap:12px">
-      <div style="display:flex;align-items:center;gap:10px">
+      <div style="display:flex;align-items:center;gap:14px">
         ${LOGO}
         <div>
           <div style="font-family:'Syne',sans-serif;font-size:18px;font-weight:700;color:#fff;line-height:1">RingReady</div>
@@ -345,6 +508,7 @@ function buildOverlayHTML(ad, sty) {
       </div>
       <div style="background:#fff;color:#111;border-radius:50px;padding:10px 22px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:700;white-space:nowrap;flex-shrink:0;letter-spacing:0">${ad.cta_button||'Start Free Trial'}</div>
     </div>`;
+
 
   if(sty==='ugc'){
     return `

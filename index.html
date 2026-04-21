@@ -101,9 +101,61 @@ select:hover,select:focus{border-color:var(--ac)}
   .rs.lft{border-right:none}
 }
 @media(max-width:380px){.sty-grid{grid-template-columns:1fr}}
+
+/* ---- LOCK SCREEN ---- */
+#lockScreen{position:fixed;inset:0;background:var(--bg);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px}
+.lock-box{background:var(--s1);border:1px solid var(--bd);border-radius:20px;padding:40px 36px;width:100%;max-width:420px}
+.lock-logo{display:flex;align-items:center;gap:12px;margin-bottom:32px;justify-content:center}
+.lock-logo img{width:36px;height:36px;object-fit:contain}
+.lock-logo span{font-family:'Syne',sans-serif;font-size:20px;font-weight:700}
+.lock-title{font-family:'Syne',sans-serif;font-size:17px;font-weight:700;margin-bottom:6px;text-align:center}
+.lock-sub{font-size:13px;color:var(--mu);text-align:center;margin-bottom:28px;line-height:1.5}
+.lock-fld{margin-bottom:16px}
+.lock-fld label{font-size:10px;font-weight:600;color:var(--mu);text-transform:uppercase;letter-spacing:.08em;display:block;margin-bottom:6px}
+.lock-fld input{width:100%;background:var(--bg);border:1px solid var(--bd);border-radius:10px;padding:10px 14px;color:var(--tx);font-family:'DM Sans',sans-serif;font-size:13px;outline:none;transition:border-color .2s}
+.lock-fld input:focus{border-color:var(--ac)}
+.lock-btn{width:100%;padding:13px;background:var(--ac);border:none;border-radius:11px;color:#fff;font-family:'Syne',sans-serif;font-size:14px;font-weight:700;cursor:pointer;margin-top:8px;transition:opacity .2s}
+.lock-btn:hover{opacity:.88}
+.lock-btn:disabled{opacity:.5;cursor:not-allowed}
+.lock-err{font-size:13px;color:var(--red);text-align:center;margin-top:12px;min-height:20px}
+.lock-hint{font-size:12px;color:var(--mu);text-align:center;margin-top:16px}
+.lock-hint a{color:var(--ac);cursor:pointer;text-decoration:none}
 </style>
 </head>
 <body>
+
+<!-- ---- LOCK SCREEN ---- -->
+<div id="lockScreen">
+  <div class="lock-box">
+    <div class="lock-logo">
+      <img src="https://omerbrod-lab.github.io/ringready-generator/logo.png" onerror="this.style.display='none'" alt="">
+      <span>RingReady</span>
+    </div>
+
+    <!-- SETUP: first time -->
+    <div id="lockSetup">
+      <div class="lock-title">Welcome! Set up your workspace</div>
+      <div class="lock-sub">Your API keys will be encrypted with AES-256-GCM and stored locally. Only your password can unlock them.</div>
+      <div class="lock-fld"><label>Anthropic API Key</label><input type="password" id="setupKeyA" placeholder="sk-ant-..."></div>
+      <div class="lock-fld"><label>OpenAI API Key</label><input type="password" id="setupKeyO" placeholder="sk-..."></div>
+      <div class="lock-fld"><label>Create Password</label><input type="password" id="setupPw" placeholder="Choose a strong password"></div>
+      <div class="lock-fld"><label>Confirm Password</label><input type="password" id="setupPw2" placeholder="Repeat password" onkeydown="if(event.key==='Enter')lockSetup()"></div>
+      <button class="lock-btn" id="setupBtn" onclick="lockSetup()">Encrypt &amp; Save</button>
+      <div class="lock-err" id="setupErr"></div>
+    </div>
+
+    <!-- UNLOCK: return visits -->
+    <div id="lockUnlock" style="display:none">
+      <div class="lock-title">Welcome back</div>
+      <div class="lock-sub">Enter your password to decrypt and load your API keys.</div>
+      <div class="lock-fld"><label>Password</label><input type="password" id="unlockPw" placeholder="Your password" onkeydown="if(event.key==='Enter')lockUnlock()"></div>
+      <button class="lock-btn" id="unlockBtn" onclick="lockUnlock()">Unlock</button>
+      <div class="lock-err" id="unlockErr"></div>
+      <div class="lock-hint"><a onclick="lockReset()">Forgot password? Reset &amp; re-enter keys</a></div>
+    </div>
+  </div>
+</div>
+
 <div class="glow"></div>
 <div class="wrap">
 
@@ -237,6 +289,99 @@ select:hover,select:focus{border-color:var(--ac)}
 
 </div>
 <script>
+// ---- LOCK SCREEN / ENCRYPTED STORAGE (AES-256-GCM + PBKDF2) ----
+(function initLock() {
+  if (localStorage.getItem('rr_enc_v1')) {
+    document.getElementById('lockSetup').style.display = 'none';
+    document.getElementById('lockUnlock').style.display = 'block';
+  }
+})();
+
+async function deriveKey(password, salt) {
+  const km = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']
+  );
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: 600000, hash: 'SHA-256' },
+    km, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']
+  );
+}
+
+function toB64(buf) {
+  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  return btoa(String.fromCharCode(...bytes));
+}
+function fromB64(b64) { return Uint8Array.from(atob(b64), c => c.charCodeAt(0)); }
+
+async function lockSetup() {
+  const keyA = document.getElementById('setupKeyA').value.trim();
+  const keyO = document.getElementById('setupKeyO').value.trim();
+  const pw   = document.getElementById('setupPw').value;
+  const pw2  = document.getElementById('setupPw2').value;
+  const errEl = document.getElementById('setupErr');
+  errEl.textContent = '';
+
+  if (!keyA.startsWith('sk-ant')) return (errEl.textContent = 'Enter a valid Anthropic key (sk-ant-...)');
+  if (!keyO.startsWith('sk-') || keyO.startsWith('sk-ant')) return (errEl.textContent = 'Enter a valid OpenAI key (sk-...)');
+  if (pw.length < 6) return (errEl.textContent = 'Password must be at least 6 characters');
+  if (pw !== pw2)    return (errEl.textContent = 'Passwords do not match');
+
+  const btn = document.getElementById('setupBtn');
+  btn.disabled = true; btn.textContent = 'Encrypting…';
+  try {
+    const salt   = crypto.getRandomValues(new Uint8Array(16));
+    const iv     = crypto.getRandomValues(new Uint8Array(12));
+    const key    = await deriveKey(pw, salt);
+    const plain  = new TextEncoder().encode(JSON.stringify({ a: keyA, o: keyO }));
+    const cipher = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plain);
+    localStorage.setItem('rr_enc_v1', JSON.stringify({ salt: toB64(salt), iv: toB64(iv), data: toB64(new Uint8Array(cipher)) }));
+    unlockApp(keyA, keyO);
+  } catch(e) {
+    errEl.textContent = 'Encryption failed: ' + e.message;
+    btn.disabled = false; btn.textContent = 'Encrypt & Save';
+  }
+}
+
+async function lockUnlock() {
+  const pw    = document.getElementById('unlockPw').value;
+  const errEl = document.getElementById('unlockErr');
+  errEl.textContent = '';
+  const btn = document.getElementById('unlockBtn');
+  btn.disabled = true; btn.textContent = 'Decrypting…';
+  try {
+    const stored = JSON.parse(localStorage.getItem('rr_enc_v1'));
+    const key    = await deriveKey(pw, fromB64(stored.salt));
+    const plain  = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(stored.iv) }, key, fromB64(stored.data));
+    const { a, o } = JSON.parse(new TextDecoder().decode(plain));
+    unlockApp(a, o);
+  } catch(e) {
+    errEl.textContent = 'Wrong password or corrupted data.';
+    btn.disabled = false; btn.textContent = 'Unlock';
+  }
+}
+
+function lockReset() {
+  if (!confirm('This will delete your saved keys. You will need to re-enter them. Continue?')) return;
+  localStorage.removeItem('rr_enc_v1');
+  document.getElementById('lockUnlock').style.display = 'none';
+  document.getElementById('lockSetup').style.display = 'block';
+  document.getElementById('setupKeyA').value = '';
+  document.getElementById('setupKeyO').value = '';
+  document.getElementById('setupPw').value   = '';
+  document.getElementById('setupPw2').value  = '';
+  document.getElementById('setupErr').textContent = '';
+}
+
+function unlockApp(keyA, keyO) {
+  document.getElementById('keyA').value  = keyA;
+  document.getElementById('keyAm').value = keyA;
+  document.getElementById('keyO').value  = keyO;
+  document.getElementById('keyOm').value = keyO;
+  chkKeys();
+  document.getElementById('lockScreen').style.display = 'none';
+}
+// ---- END LOCK SCREEN ----
+
 if(window.innerWidth<=640) document.getElementById('mob-keys').style.display='block';
 
 const LOGO_URL='https://omerbrod-lab.github.io/ringready-generator/logo.png';
